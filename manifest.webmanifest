@@ -1,0 +1,14 @@
+{
+  "name": "メルフォト",
+  "short_name": "メルフォト",
+  "description": "撮った写真をメルカリ用（正方形・明るく）に自動加工",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F4F2EF",
+  "theme_color": "#F4F2EF",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
