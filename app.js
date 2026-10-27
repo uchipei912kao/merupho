@@ -1,27 +1,50 @@
-// メルフォト: 撮った写真をメルカリ用に加工（正方形1080px・明るさと色の自動補正・軽いシャープ）。
-// 写真は端末の中だけで処理する。fetch や送信は一切しない。
+// メルフォト: 撮った写真をメルカリ用に加工（正方形1080px・明るさと色の自動補正・軽いシャープ・背景の差し替え）。
+// 写真は端末の中だけで処理する。外部への送信はしない（背景の切り抜きAIは初回にモデルを読み込むだけで、写真は送らない）。
 (() => {
   'use strict';
   const MAX = 20;            // メルカリの写真の上限
   const OUT = 1080;          // 出力サイズ（正方形）
-  const WORK = 2000;         // 作業用キャンバスの長辺（iOSのキャンバス上限対策。原寸では描かない）
+  const WORK = 1600;         // 作業用キャンバスの長辺（iOSのキャンバス上限対策。原寸では描かない）
+  const RB_URL = 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/+esm';
+  const BG = {               // 背景の種類（white は塗りつぶし、ほかは画像）
+    none: null, white: '#FFFFFF', marble: 'bg-marble.jpg', brick: 'bg-brick.jpg', wood: 'bg-wood.jpg', gray: 'bg-gray.jpg'
+  };
   const $ = (id) => document.getElementById(id);
-  const items = [];          // {id, file, blob, url, busy}
-  const opts = { shape: 'crop', tone: 'auto' };
+  const items = [];          // {id, file, blob, url, busy, mask}
+  const opts = { shape: 'crop', tone: 'auto', bg: 'none' };
   let seq = 0;
 
-  try { const s = JSON.parse(localStorage.getItem('merupho-opts') || '{}'); if (s.shape) opts.shape = s.shape; if (s.tone) opts.tone = s.tone; } catch (e) {}
+  try { const s = JSON.parse(localStorage.getItem('merupho-opts') || '{}'); ['shape', 'tone', 'bg'].forEach((k) => { if (s[k]) opts[k] = s[k]; }); } catch (e) {}
+  if (!(opts.bg in BG)) opts.bg = 'none';
 
-  // ---------- 画像処理 ----------
-  function loadImage(file) {
+  // ---------- 画像の読み込み ----------
+  function loadImage(src) {
     return new Promise((resolve, reject) => {
-      const url = URL.createObjectURL(file), img = new Image();
-      img.onload = () => resolve({ img, url });
-      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('画像を読み込めませんでした')); };
-      img.src = url;   // <img> は写真の向き(EXIF)を自動で反映する
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('画像を読み込めませんでした'));
+      img.src = src;   // <img> は写真の向き(EXIF)を自動で反映する
     });
   }
+  async function workCanvas(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await loadImage(url);
+      const sc = Math.min(1, WORK / Math.max(img.naturalWidth, img.naturalHeight));
+      const w = Math.max(1, Math.round(img.naturalWidth * sc)), h = Math.max(1, Math.round(img.naturalHeight * sc));
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const cx = c.getContext('2d', { willReadFrequently: true });
+      cx.imageSmoothingQuality = 'high'; cx.drawImage(img, 0, 0, w, h);
+      return c;
+    } finally { URL.revokeObjectURL(url); }
+  }
+  const textures = {};
+  async function texture(key) {
+    if (!textures[key]) textures[key] = loadImage(BG[key]);
+    return textures[key];
+  }
 
+  // ---------- 明るさ・色の補正 ----------
   function toneCorrect(d, strong) {
     const n = d.length, step = 16;              // 4画素に1つだけ見て統計を取る
     const lumHist = new Uint32Array(256);
@@ -31,8 +54,7 @@
     const lo = pct(lumHist, 0.01), hi = pct(lumHist, 0.99);
     // 1) ホワイトバランス: 明るい上位1%の平均色がほぼ無彩色のときだけ合わせる（赤い箱などが灰色にならないように）
     let r = 0, g = 0, b = 0, k = 0;
-    const thr = pct(lumHist, 0.99);
-    for (let i = 0; i < n; i += step) { const L = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8; if (L >= thr) { r += d[i]; g += d[i + 1]; b += d[i + 2]; k++; } }
+    for (let i = 0; i < n; i += step) { const L = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8; if (L >= hi) { r += d[i]; g += d[i + 1]; b += d[i + 2]; k++; } }
     let wb = [1, 1, 1];
     if (k > 0) {
       r /= k; g /= k; b /= k;
@@ -40,8 +62,7 @@
       if (mn > 60 && mx / mn < 1.25) wb = [r, g, b].map((c) => Math.min(1.2, Math.max(0.85, mx / c)));
     }
     // 2) レベル補正（全チャンネル共通・伸ばしすぎない）
-    const cap = strong ? 1.6 : 1.35;
-    const gain = Math.min(cap, 255 / Math.max(1, hi - lo));
+    const gain = Math.min(strong ? 1.6 : 1.35, 255 / Math.max(1, hi - lo));
     // 3) 明るさ: 平均が暗いときだけ持ち上げる（ガンマ）
     let sum = 0; for (let v = 0; v < 256; v++) sum += lumHist[v] * Math.min(255, Math.max(0, (v - lo) * gain));
     const mean = Math.max(1, sum / cnt), target = strong ? 160 : 145;
@@ -77,30 +98,97 @@
     ctx.putImageData(im, 0, 0);
   }
 
-  async function processFile(file, o) {
-    const { img, url } = await loadImage(file);
+  // ---------- 背景の切り抜き（AI） ----------
+  let rbPromise = null;
+  function loadRemover() {
+    if (!rbPromise) rbPromise = import(RB_URL).then((m) => m.removeBackground || m.default).catch((e) => { rbPromise = null; throw e; });
+    return rbPromise;
+  }
+  function status(msg) { const s = $('status'); s.textContent = msg || ''; s.hidden = !msg; }
+
+  async function getMask(it, work) {
+    if (it.mask && it.mask.w === work.width && it.mask.h === work.height) return it.mask;
+    status('背景を切り抜くAIを準備中…（初回だけ約40MB・Wi-Fi推奨）');
+    const remove = await loadRemover();
+    const input = await new Promise((res) => work.toBlob(res, 'image/jpeg', 0.95));
+    const fg = await remove(input, {
+      model: 'isnet_quint8', device: 'cpu', output: { format: 'image/png', type: 'foreground' },
+      progress: (key, cur, total) => { if (total) status('背景を切り抜くAIを準備中… ' + Math.round(cur / total * 100) + '%（初回だけ）'); }
+    });
+    status('背景を切り抜き中…');
+    const url = URL.createObjectURL(fg);
     try {
-      const sc = Math.min(1, WORK / Math.max(img.naturalWidth, img.naturalHeight));
-      const w = Math.max(1, Math.round(img.naturalWidth * sc)), h = Math.max(1, Math.round(img.naturalHeight * sc));
-      const c = document.createElement('canvas'); c.width = w; c.height = h;
-      const cx = c.getContext('2d', { willReadFrequently: true });
-      cx.imageSmoothingQuality = 'high';
-      cx.drawImage(img, 0, 0, w, h);
-      if (o.tone !== 'none') { const id = cx.getImageData(0, 0, w, h); toneCorrect(id.data, o.tone === 'strong'); cx.putImageData(id, 0, 0); }
-      const out = document.createElement('canvas'); out.width = OUT; out.height = OUT;
-      const ox = out.getContext('2d', { willReadFrequently: true });
-      ox.fillStyle = '#FFFFFF'; ox.fillRect(0, 0, OUT, OUT); ox.imageSmoothingQuality = 'high';
-      if (o.shape === 'crop') { const side = Math.min(w, h); ox.drawImage(c, (w - side) / 2, (h - side) / 2, side, side, 0, 0, OUT, OUT); }
-      else { const k = OUT / Math.max(w, h), dw = w * k, dh = h * k; ox.drawImage(c, (OUT - dw) / 2, (OUT - dh) / 2, dw, dh); }
-      if (o.tone !== 'none') sharpen(ox, OUT, o.tone === 'strong' ? 0.5 : 0.35);
-      c.width = c.height = 0;   // メモリ解放
-      return await new Promise((res) => out.toBlob((b) => { out.width = out.height = 0; res(b); }, 'image/jpeg', 0.9));
+      const img = await loadImage(url);
+      const c = document.createElement('canvas'); c.width = work.width; c.height = work.height;
+      const cx = c.getContext('2d', { willReadFrequently: true }); cx.drawImage(img, 0, 0, c.width, c.height);
+      const d = cx.getImageData(0, 0, c.width, c.height).data, a = new Uint8Array(c.width * c.height);
+      for (let i = 0; i < a.length; i++) a[i] = d[i * 4 + 3];
+      c.width = c.height = 0;
+      it.mask = { w: work.width, h: work.height, a };
+      return it.mask;
     } finally { URL.revokeObjectURL(url); }
+  }
+
+  function bbox(mask) {
+    const { w, h, a } = mask; let x0 = w, y0 = h, x1 = -1, y1 = -1, on = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (a[y * w + x] > 24) { on++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    const ratio = on / (w * h);
+    if (x1 < 0 || ratio < 0.01 || ratio > 0.97) return null;   // 切り抜きに失敗したとみなす
+    return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+  }
+
+  async function composeOnBackground(work, mask, bgKey) {
+    const box = bbox(mask); if (!box) return null;
+    const w = work.width, h = work.height;
+    const pc = document.createElement('canvas'); pc.width = w; pc.height = h;
+    const px = pc.getContext('2d', { willReadFrequently: true }); px.drawImage(work, 0, 0);
+    const id = px.getImageData(0, 0, w, h); for (let i = 0; i < mask.a.length; i++) id.data[i * 4 + 3] = mask.a[i];
+    px.putImageData(id, 0, 0);
+    const out = document.createElement('canvas'); out.width = OUT; out.height = OUT;
+    const ox = out.getContext('2d', { willReadFrequently: true }); ox.imageSmoothingQuality = 'high';
+    if (bgKey === 'white') { ox.fillStyle = '#FFFFFF'; ox.fillRect(0, 0, OUT, OUT); }
+    else { const t = await texture(bgKey); ox.drawImage(t, 0, 0, OUT, OUT); }
+    const k = Math.min(OUT * 0.8 / box.w, OUT * 0.8 / box.h), dw = box.w * k, dh = box.h * k;
+    const dx = (OUT - dw) / 2, dy = (OUT - dh) / 2 + OUT * 0.02;
+    ox.save();
+    ox.shadowColor = bgKey === 'white' ? 'rgba(0,0,0,0.18)' : 'rgba(0,0,0,0.30)';
+    ox.shadowBlur = 36; ox.shadowOffsetY = 18;                 // 商品の下にやわらかい影
+    ox.drawImage(pc, box.x, box.y, box.w, box.h, dx, dy, dw, dh);
+    ox.restore();
+    pc.width = pc.height = 0;
+    return out;
+  }
+
+  // ---------- 1枚の加工 ----------
+  async function processItem(it, o) {
+    const work = await workCanvas(it.file);
+    const original = o.bg !== 'none' ? (() => { const c = document.createElement('canvas'); c.width = work.width; c.height = work.height; c.getContext('2d').drawImage(work, 0, 0); return c; })() : null;
+    try {
+      const cx = work.getContext('2d', { willReadFrequently: true });
+      if (o.tone !== 'none') { const id = cx.getImageData(0, 0, work.width, work.height); toneCorrect(id.data, o.tone === 'strong'); cx.putImageData(id, 0, 0); }
+      let out = null;
+      if (o.bg !== 'none') {
+        let failed = false;
+        try { const mask = await getMask(it, original); out = await composeOnBackground(work, mask, o.bg); }
+        catch (e) { console.error(e); failed = true; toast('背景の切り抜きに失敗しました（電波を確認してください）'); }
+        if (!out && !failed) toast((items.indexOf(it) + 1) + '枚目は商品をうまく切り抜けなかったので、背景はそのままにしました');
+      }
+      if (!out) {
+        out = document.createElement('canvas'); out.width = OUT; out.height = OUT;
+        const ox = out.getContext('2d', { willReadFrequently: true });
+        ox.fillStyle = '#FFFFFF'; ox.fillRect(0, 0, OUT, OUT); ox.imageSmoothingQuality = 'high';
+        const w = work.width, h = work.height;
+        if (o.shape === 'crop') { const side = Math.min(w, h); ox.drawImage(work, (w - side) / 2, (h - side) / 2, side, side, 0, 0, OUT, OUT); }
+        else { const k = OUT / Math.max(w, h), dw = w * k, dh = h * k; ox.drawImage(work, (OUT - dw) / 2, (OUT - dh) / 2, dw, dh); }
+      }
+      if (o.tone !== 'none') sharpen(out.getContext('2d', { willReadFrequently: true }), OUT, o.tone === 'strong' ? 0.5 : 0.35);
+      return await new Promise((res) => out.toBlob((b) => { out.width = out.height = 0; res(b); }, 'image/jpeg', 0.9));
+    } finally { work.width = work.height = 0; if (original) original.width = original.height = 0; }
   }
 
   // ---------- 画面 ----------
   let toastTimer;
-  function toast(msg) { const t = $('toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 2200); }
+  function toast(msg) { const t = $('toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 2600); }
 
   function render() {
     const grid = $('grid');
@@ -114,11 +202,13 @@
       del.onclick = () => removeItem(it.id); tile.appendChild(del);
       grid.appendChild(tile);
     });
-    const ready = items.filter((x) => x.blob).length;
+    const ready = items.filter((x) => x.blob).length, busy = items.some((x) => x.busy);
     $('empty').hidden = items.length > 0;
     $('count').textContent = items.length + ' / ' + MAX + '枚';
     $('save').textContent = '写真を保存（' + ready + '枚）';
-    $('save').disabled = ready === 0 || items.some((x) => x.busy);
+    $('save').disabled = ready === 0 || busy;
+    if (!busy) status('');
+    document.querySelector('.opt-shape').classList.toggle('off', opts.bg !== 'none');
   }
 
   function removeItem(id) {
@@ -130,31 +220,34 @@
   async function runItem(it) {
     it.busy = true; render();
     try {
-      const blob = await processFile(it.file, opts);
+      const blob = await processItem(it, { ...opts });
       if (it.url) URL.revokeObjectURL(it.url);
       it.blob = blob; it.url = URL.createObjectURL(blob);
-    } catch (e) { toast(e.message || '加工に失敗しました'); }
+    } catch (e) { console.error(e); toast(e.message || '加工に失敗しました'); }
     it.busy = false; render();
   }
 
-  async function addFiles(fileList) {
-    const files = Array.from(fileList || []).filter((f) => /^image\//.test(f.type) || /\.(jpe?g|png|heic|heif|webp)$/i.test(f.name));
-    if (!files.length) return;
-    const room = MAX - items.length;
-    if (room <= 0) { toast('写真は20枚までです'); return; }
-    if (files.length > room) toast('20枚までなので、' + room + '枚だけ追加しました');
-    const added = files.slice(0, room).map((f) => ({ id: ++seq, file: f, blob: null, url: null, busy: true }));
-    items.push(...added); render();
-    for (const it of added) await runItem(it);   // 1枚ずつ（メモリ節約）
-  }
+  let running = Promise.resolve();
+  function enqueue(list) { running = running.then(async () => { for (const it of list) if (items.includes(it)) await runItem(it); }); return running; }
 
-  async function reprocessAll() { for (const it of items) await runItem(it); }
+  function addFiles(fileList) {
+    const files = Array.from(fileList || []).filter((f) => /^image\//.test(f.type) || /\.(jpe?g|png|heic|heif|webp)$/i.test(f.name));
+    if (!files.length) return Promise.resolve();
+    const room = MAX - items.length;
+    if (room <= 0) { toast('写真は20枚までです'); return Promise.resolve(); }
+    if (files.length > room) toast('20枚までなので、' + room + '枚だけ追加しました');
+    const added = files.slice(0, room).map((f) => ({ id: ++seq, file: f, blob: null, url: null, busy: true, mask: null }));
+    items.push(...added); render();
+    return enqueue(added);   // 1枚ずつ（メモリ節約）
+  }
 
   function setOpt(key, val) {
     opts[key] = val;
     try { localStorage.setItem('merupho-opts', JSON.stringify(opts)); } catch (e) {}
     document.querySelectorAll('[data-' + key + ']').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset[key] === val)));
-    reprocessAll();
+    items.forEach((it) => { it.busy = true; });
+    render();
+    return enqueue(items.slice());   // 切り抜き結果は覚えているので、背景や明るさを変えても速い
   }
 
   async function saveAll() {
@@ -176,10 +269,12 @@
   $('album').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
   $('clear').addEventListener('click', () => { items.forEach((x) => x.url && URL.revokeObjectURL(x.url)); items.length = 0; render(); });
   $('save').addEventListener('click', saveAll);
-  document.querySelectorAll('[data-shape]').forEach((b) => b.addEventListener('click', () => setOpt('shape', b.dataset.shape)));
-  document.querySelectorAll('[data-tone]').forEach((b) => b.addEventListener('click', () => setOpt('tone', b.dataset.tone)));
-  document.querySelectorAll('[data-shape]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.shape === opts.shape)));
-  document.querySelectorAll('[data-tone]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.tone === opts.tone)));
-  window.__merupho = { addFiles, items, opts };   // 動作確認用
+  ['shape', 'tone', 'bg'].forEach((key) => {
+    document.querySelectorAll('[data-' + key + ']').forEach((b) => {
+      b.setAttribute('aria-pressed', String(b.dataset[key] === opts[key]));
+      b.addEventListener('click', () => { if (opts[key] !== b.dataset[key]) setOpt(key, b.dataset[key]); });
+    });
+  });
+  window.__merupho = { addFiles, items, opts, setOpt, idle: () => running };   // 動作確認用
   render();
 })();

@@ -38,6 +38,16 @@ input[type=file]{display:none}
 .seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
 .seg button{font:inherit;font-size:13px;border:0;background:transparent;color:var(--muted);padding:8px 10px;min-height:36px;cursor:pointer}
 .seg button[aria-pressed="true"]{background:var(--ink);color:var(--bg);font-weight:600}
+.bgs{display:grid;gap:6px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.bgs-label{font-size:13px;color:var(--muted)}
+.chips{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.chips button{display:flex;flex-direction:column;align-items:center;gap:4px;font:inherit;font-size:12px;color:var(--ink);background:transparent;border:2px solid transparent;border-radius:12px;padding:6px 4px;cursor:pointer}
+.chips button[aria-pressed="true"]{border-color:var(--accent);background:var(--soft);font-weight:700}
+.sw{display:block;width:100%;max-width:64px;aspect-ratio:1/1;border-radius:8px;border:1px solid var(--line);background-size:cover;background-position:center}
+.sw-white{background:#FFFFFF}
+.sw-none{background:repeating-conic-gradient(#DDD 0 25%,#FFF 0 50%) 0 0/16px 16px}
+.opt-shape.off{opacity:.4;pointer-events:none}
+.status{font-size:13px;color:var(--accent);font-weight:600;margin:0 0 10px;line-height:1.5}
 .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .tile{position:relative;border-radius:12px;overflow:hidden;background:#fff;border:1px solid var(--line);aspect-ratio:1/1}
 .tile img{width:100%;height:100%;object-fit:cover;display:block;-webkit-touch-callout:default}
@@ -67,7 +77,18 @@ input[type=file]{display:none}
 </div>
 
 <div class="opts">
-  <div class="opt"><span>形</span><div class="seg" role="group" aria-label="形">
+  <div class="bgs" role="group" aria-label="背景">
+    <span class="bgs-label">背景</span>
+    <div class="chips">
+      <button type="button" data-bg="none" aria-pressed="true"><i class="sw sw-none"></i>そのまま</button>
+      <button type="button" data-bg="white" aria-pressed="false"><i class="sw sw-white"></i>真っ白</button>
+      <button type="button" data-bg="marble" aria-pressed="false"><i class="sw" style="background-image:url(bg-marble.jpg)"></i>大理石</button>
+      <button type="button" data-bg="brick" aria-pressed="false"><i class="sw" style="background-image:url(bg-brick.jpg)"></i>レンガ</button>
+      <button type="button" data-bg="wood" aria-pressed="false"><i class="sw" style="background-image:url(bg-wood.jpg)"></i>木目</button>
+      <button type="button" data-bg="gray" aria-pressed="false"><i class="sw" style="background-image:url(bg-gray.jpg)"></i>グレー</button>
+    </div>
+  </div>
+  <div class="opt opt-shape"><span>形</span><div class="seg" role="group" aria-label="形">
     <button type="button" data-shape="crop" aria-pressed="true">正方形に切り抜く</button>
     <button type="button" data-shape="fit" aria-pressed="false">白い余白で全体</button></div></div>
   <div class="opt"><span>明るさ・色</span><div class="seg" role="group" aria-label="明るさ・色">
@@ -76,9 +97,10 @@ input[type=file]{display:none}
     <button type="button" data-tone="none" aria-pressed="false">補正なし</button></div></div>
 </div>
 
+<p class="status" id="status" hidden></p>
 <div class="grid" id="grid"></div>
 <p class="empty" id="empty">「写真を撮る」で撮影すると、<br>メルカリ用（正方形・明るく）に自動で加工されます。<br>1枚目が表紙になります。</p>
-<p class="hint">写真はこのiPhoneの中だけで加工します。どこにも送信しません。<br>保存がうまくいかないときは、写真を長押しして「"写真"に追加」でも保存できます。</p>
+<p class="hint">写真はこのiPhoneの中だけで加工します。どこにも送信しません。<br>背景を変えると、商品を自動で切り抜いて真ん中に置きます（初回だけAIの準備で約40MBを読み込みます。Wi-Fi推奨）。<br>保存がうまくいかないときは、写真を長押しして「"写真"に追加」でも保存できます。</p>
 
 <div class="bar">
   <button class="btn primary" id="save" type="button" disabled>写真を保存（0枚）</button>
