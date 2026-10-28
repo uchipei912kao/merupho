@@ -5,6 +5,7 @@
   const MAX = 20;            // メルカリの写真の上限
   const OUT = 1080;          // 出力サイズ（正方形）
   const WORK = 1600;         // 作業用キャンバスの長辺（iOSのキャンバス上限対策。原寸では描かない）
+  const FILL = 0.92;        // 背景を差し替えたときに商品が占める大きさ（長い辺）
   const RB_URL = 'https://cdn.jsdelivr.net/npm/@imgly/background-removal@1.7.0/+esm';
   const BG = {               // 背景の種類（white は塗りつぶし、ほかは画像）
     none: null, white: '#FFFFFF', marble: 'bg-marble.jpg', brick: 'bg-brick.jpg', wood: 'bg-wood.jpg', gray: 'bg-gray.jpg'
@@ -80,6 +81,83 @@
       const L = R * 0.299 + G * 0.587 + B * 0.114;
       R = L + (R - L) * sat; G = L + (G - L) * sat; B = L + (B - L) * sat;
       d[i] = d[i] * (1 - mix) + R * mix; d[i + 1] = d[i + 1] * (1 - mix) + G * mix; d[i + 2] = d[i + 2] * (1 - mix) + B * mix;
+    }
+  }
+
+  // 背景を差し替えるときの補正: 切り抜いた商品だけを見て明るさと色を決める。
+  // 背景（白い布や紙）が写っていれば、それを照明の色・明るさの基準にして白に合わせる。商品の色は描き変えない。
+  function productTone(d, a, strong) {
+    const n = a.length, step = 3;
+    const lum = (i) => (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+    const pct = (h, cnt, p) => { let acc = 0, t = cnt * p; for (let v = 0; v < 256; v++) { acc += h[v]; if (acc >= t) return v; } return 255; };
+    // 1) 背景の明るい側（中央値〜98%）の平均色
+    const bh = new Uint32Array(256); let bc = 0;
+    for (let p = 0; p < n; p += step) if (a[p] < 8) { bh[lum(p * 4)]++; bc++; }
+    let wb = [1, 1, 1], gain = 1, fromBg = false;
+    if (bc > n / step * 0.03) {
+      const lo = pct(bh, bc, 0.5), hi = pct(bh, bc, 0.98);
+      let r = 0, g = 0, b = 0, k = 0;
+      for (let p = 0; p < n; p += step) if (a[p] < 8) { const i = p * 4, L = lum(i); if (L >= lo && L <= hi) { r += d[i]; g += d[i + 1]; b += d[i + 2]; k++; } }
+      if (k) {
+        r /= k; g /= k; b /= k; const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+        if (mn > 90 && mx / mn < 1.3) {   // 白っぽい無地の背景 → 照明の基準にできる
+          wb = [r, g, b].map((c) => Math.min(1.25, Math.max(0.8, mx / c)));
+          gain = Math.min(strong ? 1.7 : 1.6, Math.max(1, 246 / mx)); fromBg = true;
+        }
+      }
+    }
+    // 2) 商品の明るさの分布
+    const ph = new Uint32Array(256); let pc = 0;
+    for (let p = 0; p < n; p += step) if (a[p] > 200) { const i = p * 4; ph[Math.min(255, Math.round(((d[i] * wb[0]) * 0.299 + (d[i + 1] * wb[1]) * 0.587 + (d[i + 2] * wb[2]) * 0.114) * gain))]++; pc++; }
+    if (!pc) return false;
+    const g1 = fromBg ? 1 : Math.min(strong ? 1.5 : 1.35, Math.max(1, 245 / Math.max(1, pct(ph, pc, 0.99))));
+    gain *= g1;
+    // 3) 黒を締める: 商品のいちばん暗いところが浮いていたら下げる（フィルムの反射などの白いもやを取る）
+    const bp = Math.min(40, Math.max(0, Math.min(255, pct(ph, pc, 0.005) * g1) - 8));
+    let mean = 0; for (let v = 0; v < 256; v++) mean += ph[v] * Math.min(255, v * g1); mean = Math.max(1, (mean / pc - bp) / (255 - bp) * 255);
+    // 4) 中間の明るさを持ち上げる（暗い商品を灰色にしないよう上限つき）
+    const target = strong ? 178 : 170;
+    let gamma = mean < target ? Math.log(target / 255) / Math.log(mean / 255) : 1;
+    gamma = Math.max(strong ? 0.72 : 0.76, Math.min(1, gamma));
+    const knee = 0.82;   // 明るいところは白飛びさせずに丸める
+    const lut = [0, 1, 2].map((c) => {
+      const t = new Uint8ClampedArray(256);
+      for (let v = 0; v < 256; v++) {
+        let x = Math.max(0, v * wb[c] * gain - bp) / (255 - bp);
+        if (x > knee) x = knee + (1 - knee) * (1 - Math.exp(-(x - knee) / (1 - knee)));
+        t[v] = 255 * Math.pow(Math.min(1, x), gamma);
+      }
+      return t;
+    });
+    // 5) くすんだ色ほど鮮やかに（もともと鮮やかな色と、白・グレー・黒はそのまま）
+    const vib = strong ? 1.3 : 0.8;
+    for (let i = 0; i < d.length; i += 4) {
+      let R = lut[0][d[i]], G = lut[1][d[i + 1]], B = lut[2][d[i + 2]];
+      const mx = Math.max(R, G, B), mn = Math.min(R, G, B), s = mx ? (mx - mn) / mx : 0, f = 1 + vib * (1 - s) * Math.min(1, s * 6);
+      const L = R * 0.299 + G * 0.587 + B * 0.114;
+      d[i] = L + (R - L) * f; d[i + 1] = L + (G - L) * f; d[i + 2] = L + (B - L) * f;
+    }
+    return true;
+  }
+
+  // メリハリ: 大きめのぼかしとの差を足して、文字や模様をくっきりさせる（明るさだけに効かせて色ズレを防ぐ）
+  function clarity(d, w, h, amount) {
+    const r = Math.max(2, Math.round(Math.max(w, h) / 120)), L = new Float32Array(w * h), T = new Float32Array(w * h);
+    for (let p = 0, i = 0; p < L.length; p++, i += 4) L[p] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+    const blur = (src, dst, len, cnt, stride, lineStride) => {   // 1方向の箱ぼかし（累積和）
+      for (let l = 0; l < cnt; l++) {
+        const base = l * lineStride; let acc = 0;
+        for (let k = -r; k <= r; k++) acc += src[base + Math.min(len - 1, Math.max(0, k)) * stride];
+        for (let k = 0; k < len; k++) {
+          dst[base + k * stride] = acc / (2 * r + 1);
+          acc += src[base + Math.min(len - 1, k + r + 1) * stride] - src[base + Math.max(0, k - r) * stride];
+        }
+      }
+    };
+    blur(L, T, w, h, 1, w); const B = new Float32Array(w * h); blur(T, B, h, w, w, 1);
+    for (let p = 0, i = 0; p < L.length; p++, i += 4) {
+      const add = (L[p] - B[p]) * amount;
+      d[i] += add; d[i + 1] += add; d[i + 2] += add;
     }
   }
 
@@ -259,7 +337,7 @@
     const ox = out.getContext('2d', { willReadFrequently: true }); ox.imageSmoothingQuality = 'high';
     if (bgKey === 'white') { ox.fillStyle = '#FFFFFF'; ox.fillRect(0, 0, OUT, OUT); }
     else { const t = await texture(bgKey); ox.drawImage(t, 0, 0, OUT, OUT); }
-    const k = Math.min(OUT * 0.8 / box.w, OUT * 0.8 / box.h), dw = box.w * k, dh = box.h * k;
+    const k = Math.min(OUT * FILL / box.w, OUT * FILL / box.h), dw = box.w * k, dh = box.h * k;
     const dx = (OUT - dw) / 2, dy = (OUT - dh) / 2 + OUT * 0.02;
     ox.save();
     ox.shadowColor = bgKey === 'white' ? 'rgba(0,0,0,0.18)' : 'rgba(0,0,0,0.30)';
@@ -276,12 +354,21 @@
     const original = o.bg !== 'none' ? (() => { const c = document.createElement('canvas'); c.width = work.width; c.height = work.height; c.getContext('2d').drawImage(work, 0, 0); return c; })() : null;
     try {
       const cx = work.getContext('2d', { willReadFrequently: true });
-      if (o.tone !== 'none') { const id = cx.getImageData(0, 0, work.width, work.height); toneCorrect(id.data, o.tone === 'strong'); cx.putImageData(id, 0, 0); }
-      let out = null;
+      const strong = o.tone === 'strong';
+      let out = null, mask = null, failed = false;
       if (o.bg !== 'none') {
-        let failed = false;
-        try { const mask = await getMask(it, original); out = await composeOnBackground(work, mask, o.bg, o.angle !== 'off'); }
+        try { mask = await getMask(it, original); }
         catch (e) { console.error(e); failed = true; toast('背景の切り抜きに失敗しました（電波を確認してください）'); }
+      }
+      if (o.tone !== 'none') {
+        const id = cx.getImageData(0, 0, work.width, work.height);
+        // 背景を差し替えるときは商品だけを基準に補正、それ以外は写真全体で補正
+        if (mask && bbox(mask) && productTone(id.data, mask.a, strong)) clarity(id.data, work.width, work.height, strong ? 0.45 : 0.3);
+        else toneCorrect(id.data, strong);
+        cx.putImageData(id, 0, 0);
+      }
+      if (mask) {
+        out = await composeOnBackground(work, mask, o.bg, o.angle !== 'off');
         if (!out && !failed) toast((items.indexOf(it) + 1) + '枚目は商品をうまく切り抜けなかったので、背景はそのままにしました');
       }
       if (!out) {
